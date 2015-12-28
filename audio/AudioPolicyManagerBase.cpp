@@ -41,6 +41,13 @@
 #include <hardware/audio_effect.h>
 #include <hardware_legacy/audio_policy_conf.h>
 #include <hardware_legacy/AudioPolicyManagerBase.h>
+#include <sys/ioctl.h>
+#include <sys/select.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+
+#define MAYA_IOC_MAGIC                          'M'
+#define MAYABASE_W_SETMUTELED                   _IOW(MAYA_IOC_MAGIC, 3, int)    // set mute LED
 
 namespace android_audio_legacy {
 
@@ -1103,6 +1110,33 @@ void AudioPolicyManagerBase::initStreamVolume(AudioSystem::stream_type stream,
     }
     mStreams[stream].mIndexMin = indexMin;
     mStreams[stream].mIndexMax = indexMax;
+}
+
+status_t AudioPolicyManagerBase::setMuteLedOn(bool on)
+{
+    int fd, ret = 0;
+    char buffer[8];
+
+    if (on == true) {
+        ALOGV("## setMuteLedOn() on = true");
+        sprintf(buffer, "mute");
+    } else {
+        ALOGV("## setMuteLedOn() on = false");
+        sprintf(buffer, "unmute");
+    }
+
+    if ((fd = open("/dev/maya_base", O_RDWR)) < 0) {
+        ALOGE("Can't open device file ret = %d", fd);
+        return NO_ERROR;
+    }
+
+    ret = ioctl(fd, MAYABASE_W_SETMUTELED, buffer);
+    if (ret < 0) {
+            ALOGE("Failed to control sensor driver, err=%d, %s\n", errno, strerror(errno));
+    }
+    close(fd);
+
+    return NO_ERROR;
 }
 
 status_t AudioPolicyManagerBase::setStreamVolumeIndex(AudioSystem::stream_type stream,

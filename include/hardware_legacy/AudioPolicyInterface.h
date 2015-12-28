@@ -128,6 +128,8 @@ public:
                                       int indexMin,
                                       int indexMax) = 0;
 
+    virtual status_t setMuteLedOn(bool on) = 0;
+
     // sets the new stream volume at a level corresponding to the supplied index for the
     // supplied device. By convention, specifying AUDIO_DEVICE_OUT_DEFAULT means
     // setting volume for all devices
