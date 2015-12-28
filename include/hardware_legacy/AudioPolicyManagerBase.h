@@ -115,6 +115,7 @@ public:
         virtual void initStreamVolume(AudioSystem::stream_type stream,
                                                     int indexMin,
                                                     int indexMax);
+        virtual status_t setMuteLedOn(bool on);
         virtual status_t setStreamVolumeIndex(AudioSystem::stream_type stream,
                                               int index,
                                               audio_devices_t device);

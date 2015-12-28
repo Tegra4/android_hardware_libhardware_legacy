@@ -231,6 +231,13 @@ static int ap_get_stream_volume_index(const struct audio_policy *pol,
                                           AUDIO_DEVICE_OUT_DEFAULT);
 }
 
+static int ap_set_mute_led_on(struct audio_policy *pol,
+                                      bool on)
+{
+    struct legacy_audio_policy *lap = to_lap(pol);
+    return lap->apm->setMuteLedOn(on);
+}
+
 static int ap_set_stream_volume_index_for_device(struct audio_policy *pol,
                                       audio_stream_type_t stream,
                                       int index,
@@ -365,6 +372,7 @@ static int create_legacy_ap(const struct audio_policy_device *device,
     lap->policy.init_stream_volume = ap_init_stream_volume;
     lap->policy.set_stream_volume_index = ap_set_stream_volume_index;
     lap->policy.get_stream_volume_index = ap_get_stream_volume_index;
+    lap->policy.set_mute_led_on = ap_set_mute_led_on;
     lap->policy.set_stream_volume_index_for_device = ap_set_stream_volume_index_for_device;
     lap->policy.get_stream_volume_index_for_device = ap_get_stream_volume_index_for_device;
     lap->policy.get_strategy_for_stream = ap_get_strategy_for_stream;
