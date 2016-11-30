@@ -16,6 +16,8 @@
 
 #include <stdlib.h>
 #include <fcntl.h>
+#include <ctype.h>
+#include <net/if.h>
 #include <errno.h>
 #include <string.h>
 #include <dirent.h>
@@ -139,13 +141,20 @@ static const char DRIVER_MODULE_TAG[]   = WIFI_DRIVER_MODULE_NAME " ";
 static const char DRIVER_MODULE_PATH[]  = WIFI_DRIVER_MODULE_PATH;
 static const char DRIVER_MODULE_ARG[]   = WIFI_DRIVER_MODULE_ARG;
 static const char DRIVER_MODULE_AP_ARG[] = WIFI_DRIVER_MODULE_AP_ARG;
+#else
+char DRIVER_MODULE_NAME[PROPERTY_VALUE_MAX];
+char DRIVER_MODULE_TAG[PROPERTY_VALUE_MAX];
+char DRIVER_MODULE_PATH[PROPERTY_VALUE_MAX];
+char DRIVER_MODULE_ARG[PROPERTY_VALUE_MAX];
+char DRIVER_MODULE_AP_ARG[PROPERTY_VALUE_MAX];
 #endif
+char DRIVER_FW_PATH_AP[PROPERTY_VALUE_MAX];
 static const char FIRMWARE_LOADER[]     = WIFI_FIRMWARE_LOADER;
 static const char DRIVER_PROP_NAME[]    = "wlan.driver.status";
-static const char SUPPLICANT_NAME[]     = "wpa_supplicant";
-static const char SUPP_PROP_NAME[]      = "init.svc.wpa_supplicant";
-static const char P2P_SUPPLICANT_NAME[] = "p2p_supplicant";
-static const char P2P_PROP_NAME[]       = "init.svc.p2p_supplicant";
+static const char SUPPLICANT_NAME[]     = "rtw_suppl"; /* without p2p concurrent */
+static const char SUPP_PROP_NAME[]      = "init.svc.%s";
+static const char P2P_SUPPLICANT_NAME[] = "rtw_suppl_con"; /* p2p concurrent */
+static const char P2P_PROP_NAME[]       = "init.svc.%s";
 static const char SUPP_CONFIG_TEMPLATE[]= "/system/etc/wifi/wpa_supplicant.conf";
 static const char SUPP_CONFIG_FILE[]    = "/data/misc/wifi/wpa_supplicant.conf";
 static const char P2P_CONFIG_FILE[]     = "/data/misc/wifi/p2p_supplicant.conf";
@@ -167,6 +176,111 @@ static char supplicant_name[PROPERTY_VALUE_MAX];
 /* Is either SUPP_PROP_NAME or P2P_PROP_NAME */
 static char supplicant_prop_name[PROPERTY_KEY_MAX];
 
+int get_wifi_ifname_from_prop(char *ifname)
+{
+	ifname[0] = '\0';
+	if (property_get("wifi.interface", ifname, WIFI_TEST_INTERFACE)
+		&& strcmp(ifname, WIFI_TEST_INTERFACE) != 0)
+		return 0;
+	
+	ALOGE("Can't get wifi ifname from property \"wifi.interface\"");
+	return -1;
+}
+
+int check_wifi_ifname_from_proc(char *buf, char *target)
+{
+#define PROC_NET_DEV_PATH "/proc/net/dev"
+#define MAX_WIFI_IFACE_NUM 20
+
+	char linebuf[1024];
+	unsigned char wifi_ifcount = 0;
+	char wifi_ifaces[MAX_WIFI_IFACE_NUM][IFNAMSIZ+1];
+	int i, ret = -1;
+	int match = -1; /* if matched, this means the index*/
+	FILE *f = fopen(PROC_NET_DEV_PATH, "r");
+
+	if(buf)
+		buf[0] = '\0';
+	
+	if (!f) {
+		ALOGE("Unable to read %s: %s\n", PROC_NET_DEV_PATH, strerror(errno));
+		goto exit;
+	}
+
+	/* Get wifi interfaces form PROC_NET_DEV_PATH*/
+	memset(wifi_ifaces, 0, MAX_WIFI_IFACE_NUM * (IFNAMSIZ+1));
+	while(fgets(linebuf, sizeof(linebuf)-1, f)) {
+		
+		if (strchr(linebuf, ':')) {
+			char *dest = wifi_ifaces[wifi_ifcount];
+			char *p = linebuf;
+			
+			while(*p && isspace(*p))
+				++p;
+			while (*p && *p != ':') {
+				*dest++ = *p++;
+			}
+			*dest = '\0';
+			
+			ALOGD("%s: find %s\n", __func__, wifi_ifaces[wifi_ifcount]);
+			wifi_ifcount++;
+			if (wifi_ifcount>=MAX_WIFI_IFACE_NUM) {
+				ALOGD("%s: wifi_ifcount >= MAX_WIFI_IFACE_NUM(%u)\n", __func__,
+					MAX_WIFI_IFACE_NUM);
+				break;
+			}
+		}
+	}
+	fclose(f);
+
+	if (target) {
+		/* Try to find match */
+		for (i = 0;i < wifi_ifcount;i++) {		
+			if (strcmp(target, wifi_ifaces[i]) == 0) {
+				match = i;
+				break;
+			}
+		}
+	} else {
+		/* No target, use the first wifi_iface as target*/
+		match = 0;
+	}
+
+	if(buf && match >= 0)
+		strncpy(buf, wifi_ifaces[match], IFNAMSIZ);
+		
+	if (match >= 0)
+		ret = 0;
+exit:
+	return ret;
+}
+
+int get_wifi_ifname_from_proc(char *ifname)
+{
+	return check_wifi_ifname_from_proc(ifname, NULL);
+}
+
+#define PRIMARY     0
+#define SECONDARY   1
+
+char *wifi_ifname(int index)
+{
+#define WIFI_P2P_INTERFACE "p2p0"
+
+	char primary_if[PROPERTY_VALUE_MAX];
+
+	if (index == PRIMARY) {
+		primary_iface[0] = '\0';
+		if (get_wifi_ifname_from_prop(primary_if) == 0 &&
+			check_wifi_ifname_from_proc(primary_iface, primary_if) == 0) {
+			return primary_iface;
+		}
+	} else if (index == SECONDARY) {
+		if (check_wifi_ifname_from_proc(NULL, WIFI_P2P_INTERFACE) == 0)
+			return WIFI_P2P_INTERFACE;
+	}
+	return NULL;
+}
 
 #ifdef SAMSUNG_WIFI
 char* get_samsung_wifi_type()
@@ -257,18 +371,15 @@ const char *get_dhcp_error_string() {
     return dhcp_lasterror();
 }
 
-int is_wifi_driver_loaded() {
+int check_wifi_driver_loaded() {
     char driver_status[PROPERTY_VALUE_MAX];
-#ifdef WIFI_DRIVER_MODULE_PATH
     FILE *proc;
-    char line[sizeof(DRIVER_MODULE_TAG)+10];
-#endif
+    char line[sizeof(DRIVER_MODULE_NAME)+10];
 
-    if (!property_get(DRIVER_PROP_NAME, driver_status, NULL)
-            || strcmp(driver_status, "ok") != 0) {
-        return 0;  /* driver not loaded */
-    }
-#ifdef WIFI_DRIVER_MODULE_PATH
+#ifndef WIFI_DRIVER_MODULE_PATH
+    property_get("wifi.driver.name", DRIVER_MODULE_NAME, NULL);
+    snprintf(DRIVER_MODULE_TAG, PROPERTY_VALUE_MAX,"%s ",DRIVER_MODULE_NAME);
+#endif
     /*
      * If the property says the driver is loaded, check to
      * make sure that the property setting isn't just left
@@ -289,16 +400,27 @@ int is_wifi_driver_loaded() {
     fclose(proc);
     property_set(DRIVER_PROP_NAME, "unloaded");
     return 0;
-#else
-    return 1;
-#endif
 }
 
-int wifi_load_driver()
-{
-#ifdef WIFI_DRIVER_MODULE_PATH
+int is_wifi_driver_loaded() {
     char driver_status[PROPERTY_VALUE_MAX];
-    int count = 100; /* wait at most 20 seconds for completion */
+    if (!property_get(DRIVER_PROP_NAME, driver_status, NULL)
+            || strcmp(driver_status, "ok") != 0) {
+        return 0;  /* driver not loaded */
+    }
+#ifdef WIFI_DRIVER_MODULE_PATH
+    return check_wifi_driver_loaded();
+#else
+    if (DRIVER_MODULE_PATH[0] != '\0')
+        return check_wifi_driver_loaded();
+#endif
+    return 1;
+}
+
+int load_driver()
+{
+    char driver_status[PROPERTY_VALUE_MAX];
+    int count = 50; /* wait at most 5 seconds for completion */
     char module_arg2[256];
 #ifdef SAMSUNG_WIFI
     char* type = get_samsung_wifi_type();
@@ -330,7 +452,13 @@ int wifi_load_driver()
     }
 
     if (strcmp(FIRMWARE_LOADER,"") == 0) {
-        /* usleep(WIFI_DRIVER_LOADER_DELAY); */
+        while (wifi_ifname(PRIMARY) == NULL && count-- > 0) {
+            usleep(100000);
+        }
+        if (wifi_ifname(PRIMARY) == NULL) {
+            ALOGE("%s: get wifi_ifname(PRIMARY) fail\n", __func__);
+            goto timeout;
+        }
         property_set(DRIVER_PROP_NAME, "ok");
     }
     else {
@@ -346,30 +474,41 @@ int wifi_load_driver()
                 return -1;
             }
         }
-        usleep(200000);
+        usleep(100000);
     }
+timeout:
     property_set(DRIVER_PROP_NAME, "timeout");
     wifi_unload_driver();
     return -1;
-#else
-    property_set(DRIVER_PROP_NAME, "ok");
-    return 0;
-#endif
 }
 
-int wifi_unload_driver()
+int wifi_load_driver()
 {
-    usleep(200000); /* allow to finish interface down */
+    int ret = 0;
 #ifdef WIFI_DRIVER_MODULE_PATH
+    ret = load_driver();
+#else
+    if (property_get("wifi.driver.path", DRIVER_MODULE_PATH, NULL)) {
+        property_get("wifi.driver.arg", DRIVER_MODULE_ARG, NULL);
+        ret = load_driver();
+    } else {
+        property_set(DRIVER_PROP_NAME, "ok");
+    }
+#endif
+    return ret;
+}
+
+int unload_driver()
+{
     if (rmmod(DRIVER_MODULE_NAME) == 0) {
-        int count = 20; /* wait at most 10 seconds for completion */
+        int count = 100; /* wait at most 10 seconds for completion */
         while (count-- > 0) {
             if (!is_wifi_driver_loaded())
                 break;
-            usleep(500000);
+            usleep(100000);
         }
-        usleep(500000); /* allow card removal */
-        if (count) {
+
+        if (!is_wifi_driver_loaded()) {
 #ifdef WIFI_EXT_MODULE_NAME
             if (rmmod(EXT_MODULE_NAME) == 0)
 #endif
@@ -378,10 +517,20 @@ int wifi_unload_driver()
         return -1;
     } else
         return -1;
+}
+
+
+int wifi_unload_driver()
+{
+#ifdef WIFI_DRIVER_MODULE_PATH
+    return unload_driver();
 #else
-    property_set(DRIVER_PROP_NAME, "unloaded");
-    return 0;
+    if (property_get("wifi.driver.name", DRIVER_MODULE_NAME, NULL))
+        return unload_driver();
+    else
+        property_set(DRIVER_PROP_NAME, "unloaded");
 #endif
+    return 0;
 }
 
 int ensure_entropy_file_exists()
@@ -717,8 +866,8 @@ int wifi_start_supplicant(int p2p_supported)
 #endif
 
     if (p2p_supported) {
-        strcpy(supplicant_name, P2P_SUPPLICANT_NAME);
-        strcpy(supplicant_prop_name, P2P_PROP_NAME);
+        property_get("wifi.supplicant", supplicant_name, P2P_SUPPLICANT_NAME);
+        snprintf(supplicant_prop_name, PROPERTY_KEY_MAX, P2P_PROP_NAME, supplicant_name);
 
         /* Ensure p2p config file is created */
         if (ensure_config_file_exists(P2P_CONFIG_FILE) < 0) {
@@ -727,9 +876,13 @@ int wifi_start_supplicant(int p2p_supported)
         }
 
     } else {
-        strcpy(supplicant_name, SUPPLICANT_NAME);
-        strcpy(supplicant_prop_name, SUPP_PROP_NAME);
+        property_get("wifi.supplicant", supplicant_name, SUPPLICANT_NAME);
+        snprintf(supplicant_prop_name, PROPERTY_KEY_MAX, SUPP_PROP_NAME, supplicant_name);
     }
+
+    wifi_stop_supplicant(p2p_supported);
+    wifi_close_supplicant_connection(NULL);
+    wifi_close_supplicant_connection("sec");
 
     /* Check whether already running */
     if (property_get(supplicant_prop_name, supp_status, NULL)
@@ -738,6 +891,13 @@ int wifi_start_supplicant(int p2p_supported)
     }
 
     /* Before starting the daemon, make sure its config file exists */
+    if (p2p_supported) {
+        if (ensure_config_file_exists(P2P_CONFIG_FILE) < 0) {
+            ALOGE("Failed to create a p2p config file");
+            return -1;
+        }
+    }
+
     if (ensure_config_file_exists(SUPP_CONFIG_FILE) < 0) {
         ALOGE("Wi-Fi will not be enabled");
         return -1;
@@ -773,7 +933,22 @@ int wifi_start_supplicant(int p2p_supported)
         serial = __system_property_serial(pi);
     }
 #endif
-    property_get("wifi.interface", primary_iface, WIFI_TEST_INTERFACE);
+
+    /* Check the interface exist*/
+    if (p2p_supported) {
+        int count = 10; /* wait at most 1 seconds for completion */
+        while (wifi_ifname(SECONDARY) == NULL && count-- > 0) {
+            usleep(100000);
+        }
+        if (wifi_ifname(SECONDARY) == NULL) {
+            ALOGE("%s get wifi_ifname(SECONDARY) fail", __func__);
+            return -1;
+        }
+    }
+    if(wifi_ifname(PRIMARY) == NULL) {
+        ALOGE("%s get wifi_ifname(PRIMARY) fail", __func__);
+        return -1;
+    }
 
     property_set("ctl.start", supplicant_name);
     sched_yield();
@@ -813,11 +988,11 @@ int wifi_stop_supplicant(int p2p_supported)
     int count = 50; /* wait at most 5 seconds for completion */
 
     if (p2p_supported) {
-        strcpy(supplicant_name, P2P_SUPPLICANT_NAME);
-        strcpy(supplicant_prop_name, P2P_PROP_NAME);
+        property_get("wifi.supplicant", supplicant_name, P2P_SUPPLICANT_NAME);
+        snprintf(supplicant_prop_name, PROPERTY_KEY_MAX, P2P_PROP_NAME, supplicant_name);
     } else {
-        strcpy(supplicant_name, SUPPLICANT_NAME);
-        strcpy(supplicant_prop_name, SUPP_PROP_NAME);
+        property_get("wifi.supplicant", supplicant_name, SUPPLICANT_NAME);
+        snprintf(supplicant_prop_name, PROPERTY_KEY_MAX, SUPP_PROP_NAME, supplicant_name);
     }
 
     /* Check whether supplicant already stopped */
@@ -1098,10 +1273,15 @@ int wifi_command(const char *command, char *reply, size_t *reply_len)
 
 const char *wifi_get_fw_path(int fw_type)
 {
+    int ret = 0;
     switch (fw_type) {
     case WIFI_GET_FW_PATH_STA:
         return WIFI_DRIVER_FW_PATH_STA;
     case WIFI_GET_FW_PATH_AP:
+    ret = property_get("wifi.firmware.path.ap", DRIVER_FW_PATH_AP, "");
+    if (ret)
+        return DRIVER_FW_PATH_AP;
+    else
         return WIFI_DRIVER_FW_PATH_AP;
     case WIFI_GET_FW_PATH_P2P:
         return WIFI_DRIVER_FW_PATH_P2P;
@@ -1109,12 +1289,13 @@ const char *wifi_get_fw_path(int fw_type)
     return NULL;
 }
 
-int wifi_change_fw_path(const char *fwpath)
+int wifi_change_fw_path(const char *fwpath __unused)
 {
     int len;
     int fd;
     int ret = 0;
 
+#if 0 /* No need to change fw path */
     if (!fwpath)
         return ret;
     fd = TEMP_FAILURE_RETRY(open(WIFI_DRIVER_FW_PATH_PARAM, O_WRONLY));
@@ -1128,6 +1309,7 @@ int wifi_change_fw_path(const char *fwpath)
         ret = -1;
     }
     close(fd);
+#endif
     return ret;
 }
 
