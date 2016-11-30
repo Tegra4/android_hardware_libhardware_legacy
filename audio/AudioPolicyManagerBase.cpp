@@ -42,13 +42,15 @@
 #include <hardware/audio_effect.h>
 #include <hardware_legacy/audio_policy_conf.h>
 #include <hardware_legacy/AudioPolicyManagerBase.h>
+
+
 #include <sys/ioctl.h>
 #include <sys/select.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 
-#define MAYA_IOC_MAGIC                          'M'
-#define MAYABASE_W_SETMUTELED                   _IOW(MAYA_IOC_MAGIC, 3, int)    // set mute LED
+#define BOWSER_IOC_MAGIC                              'M'
+#define BOWSERBASE_W_SETMUTELED                       _IOW(BOWSER_IOC_MAGIC, 3, int)    // set mute LED
 
 namespace android_audio_legacy {
 
@@ -1126,12 +1128,12 @@ status_t AudioPolicyManagerBase::setMuteLedOn(bool on)
         sprintf(buffer, "unmute");
     }
 
-    if ((fd = open("/dev/maya_base", O_RDWR)) < 0) {
+    if ((fd = open("/dev/bowser_misc", O_RDWR)) < 0) {
         ALOGE("Can't open device file ret = %d", fd);
         return NO_ERROR;
     }
 
-    ret = ioctl(fd, MAYABASE_W_SETMUTELED, buffer);
+    ret = ioctl(fd, BOWSERBASE_W_SETMUTELED, buffer);
     if (ret < 0) {
             ALOGE("Failed to control sensor driver, err=%d, %s\n", errno, strerror(errno));
     }
